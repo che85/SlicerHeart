@@ -1231,6 +1231,15 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
 
     deviceToCenterlineTransform.SetAndObserveTransformToParent(parentTransform)
 
+  def getDeviceCenterLineTranslationOnly(self, deviceCenterPoint, deviceToCenterlineTransform):
+    parentTransform = vtk.vtkTransform()
+    centerLineTransform = deviceToCenterlineTransform.GetMatrixTransformFromParent()
+    centerLineTransform.SetElement(0, 3, deviceCenterPoint[0])
+    centerLineTransform.SetElement(1, 3, deviceCenterPoint[1])
+    centerLineTransform.SetElement(2, 3, deviceCenterPoint[2])
+    parentTransform.SetMatrix(centerLineTransform)
+    return parentTransform
+
   def getDeviceCenterlineTransform(self, deviceCenterPoint, lineDirectionVector):
     if self.getDeviceOrientationFlippedOnCenterline():
       deviceZAxisInRas = lineDirectionVector
@@ -1240,33 +1249,6 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
     # "PositioningTransform" is overwritten with translation and orientation
     parentTransform = getVtkTransformPlaneToWorld(deviceCenterPoint, deviceZAxisInRasUnitVector)
     return parentTransform
-
-  def getDeviceCenterLineTranslationOnly(self, deviceCenterPoint, deviceToCenterlineTransform):
-    translationMatrix = np.eye(4)
-    translationMatrix[0:3, 3] = [deviceCenterPoint[0], deviceCenterPoint[1], deviceCenterPoint[2]]
-    tempMatrix = vtk.vtkMatrix4x4()
-    vtk.vtkMatrix4x4.Multiply4x4(self.getVTKMatrixFromArray(translationMatrix),
-                                 self.getTransformMatrixWithoutTranslation(deviceToCenterlineTransform),
-                                 tempMatrix)
-    parentTransform = vtk.vtkTransform()
-    parentTransform.SetMatrix(tempMatrix)
-    return parentTransform
-
-  def getTransformMatrixWithoutTranslation(self, deviceToCenterlineTransform):
-    matrix = deviceToCenterlineTransform.GetMatrixTransformFromParent()
-    matrix.SetElement(0, 3, 0)
-    matrix.SetElement(1, 3, 0)
-    matrix.SetElement(2, 3, 0)
-    matrix.SetElement(3, 3, 1)
-    return matrix
-
-  @staticmethod
-  def getVTKMatrixFromArray(array):
-    matrix = vtk.vtkMatrix4x4()
-    for i in range(len(array)):
-      for j in range(len(array[i])):
-        matrix.SetElement(i, j, array[i, j])
-    return matrix
 
   def deformHandlesToVesselWalls(self, allowDeviceExpansionToVesselWalls):
     import numpy as np
