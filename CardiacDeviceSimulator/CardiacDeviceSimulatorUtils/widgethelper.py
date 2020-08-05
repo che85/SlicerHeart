@@ -56,10 +56,17 @@ class DeviceWidget(VTKObservationMixin, qt.QWidget):
     """Update all GUI after node changed"""
     pass
 
+
 class UIHelper(object):
 
   @staticmethod
   def addSlider(attributes, layout, valueChangedCallback):
+    sliderWidget = UIHelper.createSliderWidget(attributes, valueChangedCallback)
+    layout.addRow(attributes["name"], sliderWidget)
+    return sliderWidget
+
+  @staticmethod
+  def createSliderWidget(attributes, valueChangedCallback):
     sliderWidget = ctk.ctkSliderWidget()
     sliderWidget.singleStep = attributes["singleStep"]
     sliderWidget.pageStep = attributes["pageStep"]
@@ -71,7 +78,6 @@ class UIHelper(object):
     sliderWidget.setToolTip(attributes["info"])
     sliderWidget.tracking = True
     sliderWidget.connect('valueChanged(double)', lambda val: valueChangedCallback())
-    layout.addRow(attributes["name"], sliderWidget)
     return sliderWidget
 
   @staticmethod

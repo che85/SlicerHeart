@@ -1,6 +1,6 @@
 from slicer.util import VTKObservationMixin
-import os
 import vtk, qt, ctk, slicer
+import numpy as np
 from slicer.ScriptedLoadableModule import *
 import logging
 from CardiacDeviceSimulatorUtils.devices import *
@@ -156,10 +156,13 @@ class CardiacDeviceSimulatorWidget(ScriptedLoadableModuleWidget):
 
       if self.parameterNodeSelector.currentNode() is None:
         self.parameterNodeSelector.addNode()
-      #self.logic.setDeviceClassId(name)
 
       # Only allow update of deformed models when common section is active (not collapsed)
       self.logic.updateDeformedModelsEnabled = not toggled
+
+      originalModel = self.logic.parameterNode.GetNodeReference('OriginalModel')
+      if originalModel:
+        originalModel.SetDisplayVisibility(True)
 
       if not toggled and self.logic.updateDeformedModelsPending:
         # While we are in device selection section, only the original model is updated.
@@ -467,6 +470,15 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
 
   def getCenterlineNode(self):
     return self.parameterNode.GetNodeReference("CenterlineCurve") if self.parameterNode else None
+
+  def setDeviceCenterlinePosition(self, value):
+    if not self.parameterNode:
+      return
+    self.parameterNode.SetParameter("CenterlineCurvePosition", str(value))
+
+  def getDeviceCenterlinePosition(self):
+    value = self.parameterNode.GetParameter("CenterlineCurvePosition") if self.parameterNode else None
+    return float(value) if value else None
 
   def setDeviceOrientationFlippedOnCenterline(self, flipped):
     self.parameterNode.SetParameter('DeviceOrientationFlippedOnCenterline', 'true' if flipped else 'false')
@@ -1147,11 +1159,11 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
       fidIndex = markupsNode.AddFiducial(pos[0], pos[1], pos[2])
     markupsNode.EndModify(wasModifying)
 
-  def setDeviceNormalizedPositionAlongCenterline(self, normalizedPosition):
+  def setDeviceNormalizedPositionAlongCenterline(self, normalizedPosition, adjustOrientation):
     """normalizedPosition is between 0..1
     """
     positionOffset = self.getCenterlineNode().GetCurveLengthWorld() * normalizedPosition
-    self.alignDeviceWithCenterlineDirection(positionOffset)
+    self.alignDeviceWithCenterlineDirection(positionOffset, adjustOrientation)
 
   def getNormalizedPositionAlongCenterline(self, point):
     """Returns normalized position (0->1) along the line
@@ -1181,9 +1193,7 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
 
     return deviceCenter
 
-  def alignDeviceWithCenterlineDirection(self, deviceCenterOffset):
-
-    import numpy as np
+  def alignDeviceWithCenterlineDirection(self, deviceCenterOffset, adjustOrientation=True):
 
     # Get the distance of the two endpoints of the device from the origin
     originalModelNode = self.parameterNode.GetNodeReference('OriginalModel')
@@ -1200,7 +1210,7 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
     centerlinePoints = slicer.util.arrayFromMarkupsCurvePoints(centerlineCurveNode, world=True)
     # Ensure that there are at least two curve points (to determine line orientation)
     if startPointIndex == endPointIndex:
-      if startPointIndex>0:
+      if startPointIndex > 0:
         startPointIndex -= 1
       else:
         endPointIndex += 1
@@ -1211,19 +1221,52 @@ class CardiacDeviceSimulatorLogic(VTKObservationMixin, ScriptedLoadableModuleLog
     # of the curve, therefore we now get a more accurate position directly from the curve
     self.getCenterlineNode().GetPositionAlongCurveWorld(linePosition, 0, deviceCenterOffset)
 
+    deviceCenterPoint = linePosition
+    deviceToCenterlineTransform = self.parameterNode.GetNodeReference('PositioningTransform')
+
+    if adjustOrientation:
+      parentTransform = self.getDeviceCenterlineTransform(deviceCenterPoint, lineDirectionVector)
+    else:
+      parentTransform = self.getDeviceCenterLineTranslationOnly(deviceCenterPoint, deviceToCenterlineTransform)
+
+    deviceToCenterlineTransform.SetAndObserveTransformToParent(parentTransform)
+
+  def getDeviceCenterlineTransform(self, deviceCenterPoint, lineDirectionVector):
     if self.getDeviceOrientationFlippedOnCenterline():
       deviceZAxisInRas = lineDirectionVector
     else:
       deviceZAxisInRas = -lineDirectionVector
-
-    deviceCenterPoint = linePosition
-
     deviceZAxisInRasUnitVector = deviceZAxisInRas / np.linalg.norm(deviceZAxisInRas)
+    # "PositioningTransform" is overwritten with translation and orientation
+    parentTransform = getVtkTransformPlaneToWorld(deviceCenterPoint, deviceZAxisInRasUnitVector)
+    return parentTransform
 
-    # "PositioningTransform" is initially identity matrix; then changed by using the positioning sliders
-    deviceToCenterlineTransform = self.parameterNode.GetNodeReference('PositioningTransform')
-    rotateDeviceToAlignWithCenterlineTransform = getVtkTransformPlaneToWorld(deviceCenterPoint, deviceZAxisInRasUnitVector)
-    deviceToCenterlineTransform.SetAndObserveTransformToParent(rotateDeviceToAlignWithCenterlineTransform)
+  def getDeviceCenterLineTranslationOnly(self, deviceCenterPoint, deviceToCenterlineTransform):
+    translationMatrix = np.eye(4)
+    translationMatrix[0:3, 3] = [deviceCenterPoint[0], deviceCenterPoint[1], deviceCenterPoint[2]]
+    tempMatrix = vtk.vtkMatrix4x4()
+    vtk.vtkMatrix4x4.Multiply4x4(self.getVTKMatrixFromArray(translationMatrix),
+                                 self.getTransformMatrixWithoutTranslation(deviceToCenterlineTransform),
+                                 tempMatrix)
+    parentTransform = vtk.vtkTransform()
+    parentTransform.SetMatrix(tempMatrix)
+    return parentTransform
+
+  def getTransformMatrixWithoutTranslation(self, deviceToCenterlineTransform):
+    matrix = deviceToCenterlineTransform.GetMatrixTransformFromParent()
+    matrix.SetElement(0, 3, 0)
+    matrix.SetElement(1, 3, 0)
+    matrix.SetElement(2, 3, 0)
+    matrix.SetElement(3, 3, 1)
+    return matrix
+
+  @staticmethod
+  def getVTKMatrixFromArray(array):
+    matrix = vtk.vtkMatrix4x4()
+    for i in range(len(array)):
+      for j in range(len(array[i])):
+        matrix.SetElement(i, j, array[i, j])
+    return matrix
 
   def deformHandlesToVesselWalls(self, allowDeviceExpansionToVesselWalls):
     import numpy as np

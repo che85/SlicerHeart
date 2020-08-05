@@ -54,6 +54,7 @@ class DevicePositioningWidget(DeviceWidget):
     self.centerlineGroupBox = qt.QGroupBox("Centerline")
     self.centerlineGroupBox.setLayout(qt.QFormLayout())
 
+    self.centerLineObservers = list()
     self.centerlineNodeSelector = slicer.qMRMLNodeComboBox()
     self.centerlineNodeSelector.nodeTypes = ["vtkMRMLMarkupsCurveNode"]
     self.centerlineNodeSelector.setNodeTypeLabel("Centerline", "vtkMRMLMarkupsCurveNode")
@@ -67,7 +68,7 @@ class DevicePositioningWidget(DeviceWidget):
     self.centerlineNodeSelector.setMRMLScene(slicer.mrmlScene)
     self.centerlineNodeSelector.setToolTip("Select a curve to be used for positioning the device")
     self.centerlineNodeSelector.connect("currentNodeChanged(vtkMRMLNode*)",
-                                             self.onCenterlineNodeSelectionChanged)
+                                        self.onCenterlineNodeSelectionChanged)
 
     self.centerlinePlaceWidget = slicer.qSlicerMarkupsPlaceWidget()
     self.centerlinePlaceWidget.setMRMLScene(slicer.mrmlScene)
@@ -90,11 +91,19 @@ class DevicePositioningWidget(DeviceWidget):
     self.flipDeviceOrientationButton.enabled = (self.centerlineNodeSelector.currentNode() is not None)
 
     # Pick centerline model
-    self.moveDeviceAlongCenterlineSliderWidget = UIHelper.addSlider({
-      "name": "Move device along centerline:", "info": "Moves the device along extracted centerline", "value": 0,
+    self.deviceCenterLineSliderBox = qt.QHBoxLayout()
+    self.deviceCenterLineSliderBox.addWidget(qt.QLabel("Slide along centerline:"))
+    self.moveDeviceAlongCenterlineSliderWidget = UIHelper.createSliderWidget({
+      "info": "Moves the device along extracted centerline", "value": 0,
       "unit": "", "minimum": 0, "maximum": 100, "singleStep": 0.1, "pageStep": 1, "decimals": 1},
-      self.centerlineGroupBox.layout(), self.onMoveDeviceAlongCenterlineSliderChanged)
+      self.onMoveDeviceAlongCenterlineSliderChanged)
+    self.deviceCenterLineSliderBox.addWidget(self.moveDeviceAlongCenterlineSliderWidget)
     self.moveDeviceAlongCenterlineSliderWidget.enabled = (self.centerlineNodeSelector.currentNode() is not None)
+
+    self.adjustOrientationCheckbox = qt.QCheckBox("align orientation")
+    self.adjustOrientationCheckbox.checked = True
+    self.deviceCenterLineSliderBox.addWidget(self.adjustOrientationCheckbox)
+    self.centerlineGroupBox.layout().addRow(self.deviceCenterLineSliderBox)
 
     lay.addRow(self.centerlineGroupBox)
 
@@ -124,10 +133,9 @@ class DevicePositioningWidget(DeviceWidget):
     self.devicePositioningOrientationSliderWidget.findChildren(ctk.ctkCollapsibleGroupBox)[0].setChecked(False)
     lay.addRow(self.devicePositioningOrientationSliderWidget)
 
+    # TODO: once orientation changed, checkbox for orientation should be disabled when placing along the center line
+
     self.vesselSegmentSelector.connect('currentNodeChanged(bool)', self.processVesselSegmentButton, 'setEnabled(bool)')
-    self.centerlineNodeSelector.connect('currentNodeChanged(bool)', self.positionDeviceAtCenterlineButton, 'setEnabled(bool)')
-    self.centerlineNodeSelector.connect('currentNodeChanged(bool)', self.flipDeviceOrientationButton, 'setEnabled(bool)')
-    self.centerlineNodeSelector.connect('currentNodeChanged(bool)', self.moveDeviceAlongCenterlineSliderWidget, 'setEnabled(bool)')
 
   def setParameterNode(self, parameterNode):
     DeviceWidget.setParameterNode(self, parameterNode)
@@ -141,15 +149,46 @@ class DevicePositioningWidget(DeviceWidget):
     [vesselLumenSegmentationNode, vesselLumenSegmentId] = segment if segment else [None, ""]
     self.vesselSegmentSelector.setCurrentNode(vesselLumenSegmentationNode)
     self.vesselSegmentSelector.setCurrentSegmentID(vesselLumenSegmentId)
+    self.onCenterlineNodeSelectionChanged()
 
   def onCenterlineNodeSelectionChanged(self):
-    self.centerlinePlaceWidget.setCurrentNode(self.centerlineNodeSelector.currentNode())
-    self.logic.setCenterlineNode(self.centerlineNodeSelector.currentNode())
+    self._removeCenterlineNodeObservers(self.logic.getCenterlineNode())
+    currentNode = self.centerlineNodeSelector.currentNode()
+    self.centerlinePlaceWidget.setCurrentNode(currentNode)
+    self.logic.setCenterlineNode(currentNode)
+    self._addCenterlineNodeObservers(currentNode)
+    self._onCenterlineNodeModified(currentNode)
+    self._updatedCenterlineSlider(currentNode)
+
+  def _removeCenterlineNodeObservers(self, previousNode):
+    if self.centerLineObservers and previousNode is not None:
+      for observer in self.centerLineObservers:
+        previousNode.RemoveObserver(observer)
+      self.centerLineObservers = list()
+
+  def _addCenterlineNodeObservers(self, currentNode):
+    try:
+      for evt in [slicer.vtkMRMLMarkupsNode.PointAddedEvent, slicer.vtkMRMLMarkupsNode.PointRemovedEvent]:
+        self.centerLineObservers.append(currentNode.AddObserver(evt, self._onCenterlineNodeModified))
+    except AttributeError:
+      pass
+
+  def _onCenterlineNodeModified(self, centerLineNode, caller=None):
+    enabled = centerLineNode is not None and centerLineNode.GetNumberOfControlPoints() > 1
+    self.positionDeviceAtCenterlineButton.setEnabled(enabled)
+    self.flipDeviceOrientationButton.setEnabled(enabled)
+    self.moveDeviceAlongCenterlineSliderWidget.setEnabled(enabled)
+
+  def _updatedCenterlineSlider(self, currentNode):
+    if not currentNode:
+      return
+    storedSliderPosition = self.logic.getDeviceCenterlinePosition()
+    if storedSliderPosition:
+      oldBlockSignalsState = self.moveDeviceAlongCenterlineSliderWidget.blockSignals(True)
+      self.moveDeviceAlongCenterlineSliderWidget.value = storedSliderPosition
+      self.moveDeviceAlongCenterlineSliderWidget.blockSignals(oldBlockSignalsState)
 
   def onProcessVesselSegmentClicked(self):
-    if slicer.app.majorVersion == 4 and slicer.app.minorVersion <= 8:
-      slicer.util.messageBox("Vessel centerline extraction requires Slicer 4.9 or later.")
-      return
     self.logic.processVesselSegment()
     self.centerlineNodeSelector.setCurrentNode(self.logic.getCenterlineNode())
     [vesselLumenSegmentationNode, vesselLumenSegmentId] = self.logic.getVesselLumenSegment()
@@ -176,7 +215,8 @@ class DevicePositioningWidget(DeviceWidget):
 
   def onMoveDeviceAlongCenterlineSliderChanged(self):
     sliderValue = self.moveDeviceAlongCenterlineSliderWidget.value
-    self.logic.setDeviceNormalizedPositionAlongCenterline(sliderValue * 0.01)
+    self.logic.setDeviceCenterlinePosition(sliderValue)
+    self.logic.setDeviceNormalizedPositionAlongCenterline(sliderValue * 0.01, self.adjustOrientationCheckbox.checked)
 
   def onVesselLumenSegmentSelectionChanged(self):
     self.logic.setVesselLumenSegment(self.vesselSegmentSelector.currentNode(), self.vesselSegmentSelector.currentSegmentID())
